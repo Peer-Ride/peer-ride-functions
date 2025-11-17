@@ -4,8 +4,6 @@ import { setGlobalOptions } from "firebase-functions/v2/options";
 import { beforeUserCreated } from "firebase-functions/v2/identity";
 import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
-import { defineSecret } from "firebase-functions/params";
-import fetch from "node-fetch";
 
 setGlobalOptions({ maxInstances: 10 });
 
@@ -57,48 +55,7 @@ export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
   return;
 });
 
-const recaptchaSecretKey = defineSecret("RECAPTCHA_SECRET_KEY");
-const recaptchaDisabled = process.env.RECAPTCHA_DISABLED === "true";
 const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peer-ride-2cea2.web.app").replace(/\/$/, "");
-
-export const verifyRecaptcha = onCall({ secrets: [recaptchaSecretKey] }, async (request) => {
-  if (recaptchaDisabled) return { success: true };
-
-  const recaptchaSecret = recaptchaSecretKey.value();
-  if (!recaptchaSecret) {
-    throw new HttpsError("failed-precondition", "reCAPTCHA secret is not configured.");
-  }
-
-  const token = request.data?.token;
-  const action = request.data?.action;
-
-  if (!token || typeof token !== "string") {
-    throw new HttpsError("invalid-argument", "reCAPTCHA token is required.");
-  }
-
-  const params = new URLSearchParams({ secret: recaptchaSecret, response: token });
-  const response = await fetch("https://www.google.com/recaptcha/api/siteverify", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: params.toString(),
-  });
-
-  if (!response.ok) {
-    throw new HttpsError("unavailable", "Failed to verify reCAPTCHA token.");
-  }
-
-  const result = (await response.json()) as { success: boolean; score?: number; action?: string };
-
-  if (!result.success || (typeof result.score === "number" && result.score < 0.5)) {
-    throw new HttpsError("permission-denied", "reCAPTCHA verification failed.");
-  }
-
-  if (action && result.action && result.action !== action) {
-    throw new HttpsError("permission-denied", "reCAPTCHA action mismatch.");
-  }
-
-  return { success: true };
-});
 
 type CreatePairRequestPayload = {
   tripId?: unknown;
