@@ -64,6 +64,16 @@ type CreatePairRequestPayload = {
   requesterName?: unknown;
 };
 
+type CreateTripPayload = {
+  originId?: unknown;
+  destinationId?: unknown;
+  departureStart?: unknown;
+  departureEnd?: unknown;
+  luggage?: unknown;
+  note?: unknown;
+  hostNickname?: unknown;
+};
+
 const isFiniteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
 
@@ -196,6 +206,74 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     id: docRef.id,
     createdAt: Date.now(),
   };
+});
+
+const isIsoString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+
+export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Sign in to create a trip.");
+  }
+
+  const { originId, destinationId, departureStart, departureEnd, luggage, note, hostNickname } =
+    request.data as CreateTripPayload;
+
+  if (!originId || typeof originId !== "string") {
+    throw new HttpsError("invalid-argument", "originId is required.");
+  }
+  if (!destinationId || typeof destinationId !== "string") {
+    throw new HttpsError("invalid-argument", "destinationId is required.");
+  }
+  if (!isIsoString(departureStart) || !isIsoString(departureEnd)) {
+    throw new HttpsError("invalid-argument", "departureStart and departureEnd are required ISO strings.");
+  }
+
+  const luggageInput = luggage as Record<string, unknown> | undefined;
+  const luggageValid =
+    luggageInput &&
+    ["carry-on-small", "carry-on-large", "checked-small", "checked-large"].every(
+      (key) => typeof luggageInput[key] === "number" && Number.isFinite(luggageInput[key] as number) && (luggageInput[key] as number) >= 0,
+    );
+
+  if (!luggageValid) {
+    throw new HttpsError("invalid-argument", "Luggage must include numeric counts for each size.");
+  }
+
+  // Limit: max 3 active trips (open or paired)
+  const active = await admin
+    .firestore()
+    .collection("trips")
+    .where("hostId", "==", uid)
+    .where("status", "in", ["open", "paired"])
+    .get();
+
+  if (active.size >= 3) {
+    throw new HttpsError(
+      "resource-exhausted",
+      "You can host up to 3 active trips. Complete or cancel one before creating a new trip.",
+    );
+  }
+
+  const departureStartDate = new Date(departureStart as string);
+  const departureEndDate = new Date(departureEnd as string);
+
+  const docRef = await admin.firestore().collection("trips").add({
+    hostId: uid,
+    hostNickname: typeof hostNickname === "string" && hostNickname.trim() ? hostNickname.trim() : request.auth?.token?.name ?? "Host",
+    originId,
+    destinationId,
+    departureStart: departureStartDate,
+    departureEnd: departureEndDate,
+    luggage: luggageInput,
+    note: typeof note === "string" && note.trim() ? note.trim() : null,
+    status: "open",
+    guest: null,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { id: docRef.id };
 });
 
 export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}", async (event) => {
