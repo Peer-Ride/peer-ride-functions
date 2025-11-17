@@ -2,6 +2,7 @@
 import * as admin from "firebase-admin";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { beforeUserCreated } from "firebase-functions/v2/identity";
+import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
 import fetch from "node-fetch";
@@ -238,4 +239,61 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     id: docRef.id,
     createdAt: Date.now(),
   };
+});
+
+export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}", async (event) => {
+  const beforeStatus = event.data?.before.data()?.status as string | undefined;
+  const afterData = event.data?.after.data() as Record<string, unknown> | undefined;
+  const afterStatus = afterData?.status as string | undefined;
+
+  if (!afterData || beforeStatus === afterStatus || afterStatus !== "accepted") {
+    return;
+  }
+
+  const requesterId = afterData.requesterId as string | undefined;
+  const hostNickname = (afterData.hostNickname as string | undefined) ?? "Host";
+  const tripId = afterData.tripId as string | undefined;
+
+  if (!requesterId || !tripId) return;
+
+  let requesterEmail: string | undefined;
+  try {
+    const user = await admin.auth().getUser(requesterId);
+    requesterEmail = user.email ?? undefined;
+  } catch (err) {
+    console.warn("Could not load requester user for email", err);
+  }
+
+  if (!requesterEmail) return;
+
+  const tripSnapshot = await admin.firestore().doc(`trips/${tripId}`).get();
+  const tripData = tripSnapshot.data() as {
+    originId?: string;
+    destinationId?: string;
+    departureStart?: admin.firestore.Timestamp;
+    departureEnd?: admin.firestore.Timestamp;
+    hostNickname?: string;
+  } | undefined;
+
+  const origin = tripData?.originId ?? "Origin";
+  const destination = tripData?.destinationId ?? "Destination";
+  const start = tripData?.departureStart?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
+  const end = tripData?.departureEnd?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
+  const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
+
+  await admin.firestore().collection("mail").add({
+    to: requesterEmail,
+    message: {
+      subject: `Your pairing request was accepted by ${tripData?.hostNickname ?? hostNickname}`,
+      html: `
+        <p>Great news!</p>
+        <p>Your pairing request for <strong>${origin} → ${destination}</strong> was accepted.</p>
+        <ul>
+          <li>Host: ${tripData?.hostNickname ?? hostNickname}</li>
+          <li>Window: ${start} – ${end}</li>
+        </ul>
+        <p><a href="${tripUrl}">Open trip details</a> to coordinate.</p>
+      `,
+    },
+  });
 });
