@@ -5,6 +5,8 @@ import { beforeUserCreated } from "firebase-functions/v2/identity";
 import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 
+const TIMEZONE = "America/Chicago";
+
 setGlobalOptions({ maxInstances: 10 });
 
 admin.initializeApp();
@@ -178,8 +180,8 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     if (hostEmail) {
       const origin = tripData.originId ?? "Origin";
       const destination = tripData.destinationId ?? "Destination";
-      const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
-      const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
+      const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+      const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
 
       await admin.firestore().collection("mail").add({
         to: hostEmail,
@@ -312,8 +314,8 @@ export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}"
 
   const origin = tripData?.originId ?? "Origin";
   const destination = tripData?.destinationId ?? "Destination";
-  const start = tripData?.departureStart?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
-  const end = tripData?.departureEnd?.toDate().toLocaleString("en-US", { timeZone: "UTC" }) ?? "";
+  const start = tripData?.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+  const end = tripData?.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
   const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
 
   await admin.firestore().collection("mail").add({
