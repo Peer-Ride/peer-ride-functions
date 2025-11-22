@@ -439,17 +439,30 @@ export const cleanupStaleData = onSchedule({
 }, async () => {
   const db = admin.firestore();
   const now = new Date();
-  const cutoffTrip = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const cutoffOpenTrip = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000);
+  const cutoffAllTrip = new Date(cutoffOpenTrip.getTime() - 2 * 24 * 60 * 60 * 1000);
   const cutoffMail = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
   // Find open/expired trips
-  const tripsSnap = await db
+  const tripsSnapOpen = await db
     .collection("trips")
     .where("status", "==", "open")
-    .where("departureEnd", "<", cutoffTrip)
+    .where("departureEnd", "<", cutoffOpenTrip)
     .get();
 
-  for (const tripDoc of tripsSnap.docs) {
+  const tripsSnapAll = await db
+    .collection("trips")
+    .where("departureEnd", "<", cutoffAllTrip)
+    .get();
+  
+  let tripsToDelete = tripsSnapOpen.docs;
+  for (const doc of tripsSnapAll.docs) {
+    if (!tripsToDelete.find((d) => d.id === doc.id)) {
+      tripsToDelete.push(doc);
+    }
+  }
+
+  for (const tripDoc of tripsToDelete) {
     const tripId = tripDoc.id;
 
     // delete pairing requests for this trip
