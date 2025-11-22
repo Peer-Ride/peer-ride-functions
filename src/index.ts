@@ -57,7 +57,7 @@ export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
   return;
 });
 
-const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peer-ride-2cea2.web.app").replace(/\/$/, "");
+const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peerride.app").replace(/\/$/, "");
 
 type CreatePairRequestPayload = {
   tripId?: unknown;
@@ -78,6 +78,8 @@ type CreateTripPayload = {
 
 const isFiniteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+const isIsoString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 
 export const createPairRequest = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = request.auth?.uid;
@@ -210,8 +212,6 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
   };
 });
 
-const isIsoString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
-
 export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = request.auth?.uid;
   if (!uid) {
@@ -278,12 +278,92 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   return { id: docRef.id };
 });
 
+type AcceptPairRequestPayload = {
+  requestId?: unknown;
+};
+
+export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Sign in to accept pairing requests.");
+  }
+
+  const { requestId } = request.data as AcceptPairRequestPayload;
+  if (!requestId || typeof requestId !== "string") {
+    throw new HttpsError("invalid-argument", "requestId is required.");
+  }
+
+  const reqRef = admin.firestore().doc(`pairRequests/${requestId}`);
+  const tripRefFromReq = (tripId: string) => admin.firestore().doc(`trips/${tripId}`);
+
+  await admin.firestore().runTransaction(async (txn) => {
+    const reqSnap = await txn.get(reqRef);
+    if (!reqSnap.exists) {
+      throw new HttpsError("not-found", "Pair request not found.");
+    }
+    const reqData = reqSnap.data() as any;
+    if (reqData.status !== "pending") {
+      throw new HttpsError("failed-precondition", "Only pending requests can be accepted.");
+    }
+
+    const tripId = reqData.tripId as string | undefined;
+    if (!tripId) {
+      throw new HttpsError("failed-precondition", "Request is missing tripId.");
+    }
+
+    const tripSnap = await txn.get(tripRefFromReq(tripId));
+    if (!tripSnap.exists) {
+      throw new HttpsError("not-found", "Trip not found.");
+    }
+
+    const tripData = tripSnap.data() as any;
+    if (tripData.hostId !== uid) {
+      throw new HttpsError("permission-denied", "Only the host can accept requests for this trip.");
+    }
+    if (tripData.status && tripData.status !== "open") {
+      throw new HttpsError("failed-precondition", "Trip is not open for pairing.");
+    }
+
+    txn.update(reqRef, { status: "accepted", updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    txn.update(tripRefFromReq(tripId), {
+      guest: {
+        id: reqData.requesterId,
+        nickname: reqData.requesterName,
+        luggage: reqData.luggage,
+        note: reqData.note ?? null,
+      },
+      status: "paired",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  // Decline other pending requests for this trip outside the transaction.
+  const reqSnap = await reqRef.get();
+  const tripId = (reqSnap.data() as any).tripId as string;
+  const pending = await admin
+    .firestore()
+    .collection("pairRequests")
+    .where("tripId", "==", tripId)
+    .where("status", "==", "pending")
+    .get();
+
+  const batch = admin.firestore().batch();
+  pending.docs
+    .filter((doc) => doc.id !== requestId)
+    .forEach((doc) => batch.update(doc.ref, { status: "declined", updatedAt: admin.firestore.FieldValue.serverTimestamp() }));
+  if (!pending.empty) {
+    await batch.commit().catch((err) => console.warn("Decline others failed", err));
+  }
+
+  return { ok: true };
+});
+
 export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}", async (event) => {
   const beforeStatus = event.data?.before.data()?.status as string | undefined;
   const afterData = event.data?.after.data() as Record<string, unknown> | undefined;
   const afterStatus = afterData?.status as string | undefined;
 
-  if (!afterData || beforeStatus === afterStatus || afterStatus !== "accepted") {
+  if (!afterData || beforeStatus === afterStatus) {
     return;
   }
 
@@ -318,19 +398,35 @@ export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}"
   const end = tripData?.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
   const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
 
-  await admin.firestore().collection("mail").add({
-    to: requesterEmail,
-    message: {
-      subject: `Your pairing request was accepted by ${tripData?.hostNickname ?? hostNickname}`,
-      html: `
-        <p>Great news!</p>
-        <p>Your pairing request for <strong>${origin} → ${destination}</strong> was accepted.</p>
-        <ul>
-          <li>Host: ${tripData?.hostNickname ?? hostNickname}</li>
-          <li>Window: ${start} – ${end}</li>
-        </ul>
-        <p><a href="${tripUrl}">Open trip details</a> to coordinate.</p>
-      `,
-    },
-  });
+  if (afterStatus === "accepted") {
+    await admin.firestore().collection("mail").add({
+      to: requesterEmail,
+      message: {
+        subject: `Your pairing request was accepted by ${tripData?.hostNickname ?? hostNickname}`,
+        html: `
+          <p>Great news!</p>
+          <p>Your pairing request for <strong>${origin} → ${destination}</strong> was accepted.</p>
+          <ul>
+            <li>Host: ${tripData?.hostNickname ?? hostNickname}</li>
+            <li>Window: ${start} – ${end}</li>
+          </ul>
+          <p><a href="${tripUrl}">Open trip details</a> to coordinate.</p>
+        `,
+      },
+    });
+  }
+
+  if (afterStatus === "declined") {
+    await admin.firestore().collection("mail").add({
+      to: requesterEmail,
+      message: {
+        subject: `Your pairing request was declined by ${tripData?.hostNickname ?? hostNickname}`,
+        html: `
+          <p>Your request for <strong>${origin} → ${destination}</strong> was declined.</p>
+          <p>You can browse more trips and send another request.</p>
+          <p><a href="${frontendBaseUrl}">Open Peer Ride</a></p>
+        `,
+      },
+    });
+  }
 });
