@@ -3,6 +3,7 @@ import * as admin from "firebase-admin";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { beforeUserCreated } from "firebase-functions/v2/identity";
 import { onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 
 const TIMEZONE = "America/Chicago";
@@ -15,6 +16,7 @@ const ALLOWED_DOMAINS_DOC_PATH = "config/emailDomains";
 let cachedDomains: string[] | null = null;
 let lastFetchMs = 0;
 const CACHE_TTL_MS = 60_000;
+const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peerride.app").replace(/\/$/, "");
 
 async function getAllowedDomains(): Promise<string[]> {
   const now = Date.now();
@@ -56,8 +58,6 @@ export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
 
   return;
 });
-
-const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peerride.app").replace(/\/$/, "");
 
 type CreatePairRequestPayload = {
   tripId?: unknown;
@@ -428,5 +428,56 @@ export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}"
         `,
       },
     });
+  }
+});
+
+// Scheduled cleanup: daily. Removes stale open trips (2+ days past departureEnd) and old mails.
+export const cleanupStaleData = onSchedule({
+  schedule: "0 8 * * *",
+  timeZone: TIMEZONE,
+  retryCount: 3,
+}, async () => {
+  const db = admin.firestore();
+  const now = new Date();
+  const cutoffTrip = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const cutoffMail = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  // Find open/expired trips
+  const tripsSnap = await db
+    .collection("trips")
+    .where("status", "==", "open")
+    .where("departureEnd", "<", cutoffTrip)
+    .get();
+
+  for (const tripDoc of tripsSnap.docs) {
+    const tripId = tripDoc.id;
+
+    // delete pairing requests for this trip
+    const reqs = await db.collection("pairRequests").where("tripId", "==", tripId).get();
+    const batch = db.batch();
+    reqs.docs.forEach((doc) => batch.delete(doc.ref));
+
+    // delete chat messages subcollection
+    const messages = await db.collection(`tripChats/${tripId}/messages`).get();
+    messages.docs.forEach((msg) => batch.delete(msg.ref));
+
+    batch.delete(tripDoc.ref);
+    await batch.commit();
+  }
+
+  // Cleanup old mail docs
+  const mailSnap = await db.collection("mail").get();
+  const mailBatch = db.batch();
+  let mailDeletes = 0;
+  mailSnap.docs.forEach((doc) => {
+    const createdField = doc.get("created") as admin.firestore.Timestamp | undefined;
+    const created = createdField?.toDate() ?? doc.createTime.toDate();
+    if (created < cutoffMail) {
+      mailBatch.delete(doc.ref);
+      mailDeletes += 1;
+    }
+  });
+  if (mailDeletes > 0) {
+    await mailBatch.commit().catch((err) => console.warn("mail cleanup failed", err));
   }
 });
