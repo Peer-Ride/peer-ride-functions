@@ -29,8 +29,8 @@ async function getAllowedDomains(): Promise<string[]> {
   const domains = snapshot.get("domains");
   if (!Array.isArray(domains) || domains.some((item) => typeof item !== "string")) {
     throw new HttpsError(
-        "failed-precondition",
-        "Allowed email domains configuration is missing or invalid.",
+      "failed-precondition",
+      "Allowed email domains configuration is missing or invalid.",
     );
   }
 
@@ -51,8 +51,8 @@ export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
 
   if (!userDomain || !allowedDomains.includes(userDomain)) {
     throw new HttpsError(
-        "permission-denied",
-        `Unauthorized email domain "${userDomain ?? "unknown"}". Please use an allowed campus email.`,
+      "permission-denied",
+      `Unauthorized email domain "${userDomain ?? "unknown"}". Please use an allowed campus email.`,
     );
   }
 
@@ -66,15 +66,7 @@ type CreatePairRequestPayload = {
   requesterName?: unknown;
 };
 
-type CreateTripPayload = {
-  originId?: unknown;
-  destinationId?: unknown;
-  departureStart?: unknown;
-  departureEnd?: unknown;
-  luggage?: unknown;
-  note?: unknown;
-  hostNickname?: unknown;
-};
+
 
 const isFiniteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -218,14 +210,14 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
     throw new HttpsError("unauthenticated", "Sign in to create a trip.");
   }
 
-  const { originId, destinationId, departureStart, departureEnd, luggage, note, hostNickname } =
-    request.data as CreateTripPayload;
+  const { origin, destination, departureStart, departureEnd, luggage, note, hostNickname } =
+    request.data as any;
 
-  if (!originId || typeof originId !== "string") {
-    throw new HttpsError("invalid-argument", "originId is required.");
+  if (!origin || typeof origin !== "object" || !origin.id || !origin.name) {
+    throw new HttpsError("invalid-argument", "origin is required and must be a valid location object.");
   }
-  if (!destinationId || typeof destinationId !== "string") {
-    throw new HttpsError("invalid-argument", "destinationId is required.");
+  if (!destination || typeof destination !== "object" || !destination.id || !destination.name) {
+    throw new HttpsError("invalid-argument", "destination is required and must be a valid location object.");
   }
   if (!isIsoString(departureStart) || !isIsoString(departureEnd)) {
     throw new HttpsError("invalid-argument", "departureStart and departureEnd are required ISO strings.");
@@ -263,8 +255,8 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   const docRef = await admin.firestore().collection("trips").add({
     hostId: uid,
     hostNickname: typeof hostNickname === "string" && hostNickname.trim() ? hostNickname.trim() : request.auth?.token?.name ?? "Host",
-    originId,
-    destinationId,
+    origin,
+    destination,
     departureStart: departureStartDate,
     departureEnd: departureEndDate,
     luggage: luggageInput,
@@ -454,7 +446,7 @@ export const cleanupStaleData = onSchedule({
     .collection("trips")
     .where("departureEnd", "<", cutoffAllTrip)
     .get();
-  
+
   let tripsToDelete = tripsSnapOpen.docs;
   for (const doc of tripsSnapAll.docs) {
     if (!tripsToDelete.find((d) => d.id === doc.id)) {
