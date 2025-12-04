@@ -64,6 +64,8 @@ type CreatePairRequestPayload = {
   luggage?: unknown;
   note?: unknown;
   requesterName?: unknown;
+  requesterContactMethod?: unknown;
+  requesterContactValue?: unknown;
 };
 
 
@@ -79,10 +81,30 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     throw new HttpsError("unauthenticated", "Sign in to submit a pairing request.");
   }
 
-  const { tripId, luggage, note, requesterName } = request.data as CreatePairRequestPayload;
+  const { tripId, luggage, note, requesterName, requesterContactMethod, requesterContactValue } = request.data as CreatePairRequestPayload;
 
   if (!tripId || typeof tripId !== "string") {
     throw new HttpsError("invalid-argument", "tripId is required.");
+  }
+
+  // Validate contact method
+  const validMethods = ["chat", "email", "phone"];
+  const method = (typeof requesterContactMethod === "string" && validMethods.includes(requesterContactMethod))
+    ? requesterContactMethod
+    : "chat";
+
+  let contactValue: string | null = null;
+  if (method === "email" || method === "phone") {
+    if (typeof requesterContactValue !== "string" || !requesterContactValue.trim()) {
+      // If email is selected but not provided, try to use auth email
+      if (method === "email" && request.auth?.token?.email) {
+        contactValue = request.auth.token.email;
+      } else {
+        throw new HttpsError("invalid-argument", `Contact value is required for ${method}.`);
+      }
+    } else {
+      contactValue = requesterContactValue.trim();
+    }
   }
 
   const luggageInput = luggage as Record<string, unknown> | undefined;
@@ -151,6 +173,8 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     hostNickname: tripData.hostNickname ?? "Host",
     requesterId: uid,
     requesterName: requesterDisplayName,
+    requesterContactMethod: method,
+    requesterContactValue: contactValue,
     luggage: { carryOnSmall, carryOnLarge, checkedSmall, checkedLarge },
     note: typeof note === "string" && note.trim() ? note.trim() : null,
     status: "pending",
@@ -210,7 +234,7 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
     throw new HttpsError("unauthenticated", "Sign in to create a trip.");
   }
 
-  const { origin, destination, departureStart, departureEnd, luggage, note, hostNickname } =
+  const { origin, destination, departureStart, departureEnd, luggage, note, hostNickname, hostContactMethod, hostContactValue } =
     request.data as any;
 
   if (!origin || typeof origin !== "object" || !origin.id || !origin.name) {
@@ -221,6 +245,26 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   }
   if (!isIsoString(departureStart) || !isIsoString(departureEnd)) {
     throw new HttpsError("invalid-argument", "departureStart and departureEnd are required ISO strings.");
+  }
+
+  // Validate contact method
+  const validMethods = ["chat", "email", "phone"];
+  const method = (typeof hostContactMethod === "string" && validMethods.includes(hostContactMethod))
+    ? hostContactMethod
+    : "chat";
+
+  let contactValue: string | null = null;
+  if (method === "email" || method === "phone") {
+    if (typeof hostContactValue !== "string" || !hostContactValue.trim()) {
+      // If email is selected but not provided, try to use auth email
+      if (method === "email" && request.auth?.token?.email) {
+        contactValue = request.auth.token.email;
+      } else {
+        throw new HttpsError("invalid-argument", `Contact value is required for ${method}.`);
+      }
+    } else {
+      contactValue = hostContactValue.trim();
+    }
   }
 
   const luggageInput = luggage as Record<string, unknown> | undefined;
@@ -255,6 +299,8 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   const docRef = await admin.firestore().collection("trips").add({
     hostId: uid,
     hostNickname: typeof hostNickname === "string" && hostNickname.trim() ? hostNickname.trim() : request.auth?.token?.name ?? "Host",
+    hostContactMethod: method,
+    hostContactValue: contactValue,
     origin,
     destination,
     departureStart: departureStartDate,
@@ -323,6 +369,8 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
         nickname: reqData.requesterName,
         luggage: reqData.luggage,
         note: reqData.note ?? null,
+        guestContactMethod: reqData.requesterContactMethod ?? "chat",
+        guestContactValue: reqData.requesterContactValue ?? null,
       },
       status: "paired",
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
