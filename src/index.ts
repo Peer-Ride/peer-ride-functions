@@ -278,18 +278,19 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
     throw new HttpsError("invalid-argument", "Luggage must include numeric counts for each size.");
   }
 
-  // Limit: max 3 active trips (open or paired)
+  // Limit: max 5 active trips (open or paired)
   const active = await admin
     .firestore()
     .collection("trips")
     .where("hostId", "==", uid)
     .where("status", "in", ["open", "paired"])
+    .where("departureEnd", ">=", new Date())
     .get();
 
-  if (active.size >= 3) {
+  if (active.size >= 5) {
     throw new HttpsError(
       "resource-exhausted",
-      "You can host up to 3 active trips. Complete or cancel one before creating a new trip.",
+      "You can host up to 5 active trips. Complete or cancel one before creating a new trip.",
     );
   }
 
