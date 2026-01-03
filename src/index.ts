@@ -132,10 +132,14 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     hostId?: string;
     hostNickname?: string;
     status?: string;
-    originId?: string;
-    destinationId?: string;
     departureStart?: admin.firestore.Timestamp;
     departureEnd?: admin.firestore.Timestamp;
+    origin: {
+      name: string;
+    }
+    destination: {
+      name: string;
+    }
   };
 
   if (!tripData.hostId) {
@@ -196,8 +200,8 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     const hostEmail = hostRecord.email;
 
     if (hostEmail) {
-      const origin = tripData.originId ?? "Origin";
-      const destination = tripData.destinationId ?? "Destination";
+      const origin = tripData.origin.name;
+      const destination = tripData.destination.name;
       const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
       const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
 
@@ -370,7 +374,7 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
         nickname: reqData.requesterName,
         luggage: reqData.luggage,
         note: reqData.note ?? null,
-        guestContactMethod: reqData.requesterContactMethod ?? "chat",
+        guestContactMethod: reqData.requesterContactMethod ?? "email",
         guestContactValue: reqData.requesterContactValue ?? null,
       },
       status: "paired",
@@ -399,6 +403,107 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
   return { ok: true };
 });
 
+const getHoursToTrip = (departureStart: Date): number => {
+  const now = new Date();
+  const diffMs = departureStart.getTime() - now.getTime();
+  return Math.round(diffMs / (1000 * 60 * 60));
+};
+
+const getCommonEmailData = (
+  tripData: any,
+  tripId: string
+) => {
+  const origin = tripData.origin.name;
+  const destination = tripData.destination.name;
+  const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+  const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+  const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
+
+  const departureDate = tripData.departureStart?.toDate();
+  const hoursToTrip = departureDate ? getHoursToTrip(departureDate) : 0;
+  const isWithin30Hours = hoursToTrip <= 30;
+
+  const contactInfoText = isWithin30Hours
+    ? `<strong>Because your trip is within 30 hours</strong>, it might be helpful to exchange phone numbers or emails to facilitate prompt finalisation of details.`
+    : `Feel free to exchange emails or phone numbers if you'd like to facilitate easier communication.`;
+
+  return { origin, destination, start, end, tripUrl, hoursToTrip, contactInfoText };
+};
+
+const getContactDetailsHtml = (method: unknown, value: unknown, name: string): string => {
+  if (method === "email" && typeof value === "string" && value.trim()) {
+    return `<p>You can also contact <strong>${name}</strong> via email: <a href="mailto:${value}">${value}</a></p>`;
+  }
+  if (method === "phone" && typeof value === "string" && value.trim()) {
+    return `<p>You can also contact <strong>${name}</strong> via phone: <a href="tel:${value}">${value}</a></p>`;
+  }
+  return "";
+};
+
+const sendGuestAcceptanceEmail = async (
+  email: string,
+  hostNickname: string,
+  commonData: any,
+  contactMethod?: unknown,
+  contactValue?: unknown
+) => {
+  const { origin, destination, start, end, tripUrl, hoursToTrip, contactInfoText } = commonData;
+  const specificContactHtml = getContactDetailsHtml(contactMethod, contactValue, hostNickname);
+
+  await admin.firestore().collection("mail").add({
+    to: email,
+    message: {
+      subject: `Peer-Ride: Your pairing request was accepted by ${hostNickname}`,
+      html: `
+        <p>Great news! Your pairing request for <strong>${origin} -> ${destination}</strong> was accepted by <strong>${hostNickname}</strong>. Your pairing is now confirmed.</p>
+        <ul>
+          <li>Window: ${start} – ${end}</li>
+          <li>Time to trip: ${hoursToTrip} hours</li>
+        </ul>
+        <p>Please <a href="${tripUrl}">open trip details</a> to coordinate via our in-app live chat, which can also be found by selecting the <strong>"Me"</strong> page, then the <strong>"View"</strong> button on the correct card.</p>
+        ${specificContactHtml}
+        <p>${contactInfoText}</p>
+        <p>Please consider using Uber and Lyft's two stop functionality when booking a ride, which may save you some walking.</p>
+        <br>
+        <p>Best regards,</p>
+        <p>Peer-ride support team</p>
+      `,
+    },
+  });
+};
+
+const sendHostAcceptanceEmail = async (
+  email: string,
+  guestNickname: string,
+  commonData: any,
+  contactMethod?: unknown,
+  contactValue?: unknown
+) => {
+  const { origin, destination, start, end, tripUrl, hoursToTrip, contactInfoText } = commonData;
+  const specificContactHtml = getContactDetailsHtml(contactMethod, contactValue, guestNickname);
+
+  await admin.firestore().collection("mail").add({
+    to: email,
+    message: {
+      subject: `Peer-Ride: You have confirmed your pairing with ${guestNickname}`,
+      html: `
+        <p>You have confirmed your pairing with <strong>${guestNickname}</strong> for <strong>${origin} -> ${destination}</strong>!</p>
+        <ul>
+          <li>Window: ${start} – ${end}</li>
+          <li>Time to trip: ${hoursToTrip} hours</li>
+        </ul>
+        <p>Please <a href="${tripUrl}">open trip details</a> to coordinate via our in-app live chat, which can also be found by selecting the <strong>"Me"</strong> page, then the <strong>"View"</strong> button on the correct card.</p>
+        ${specificContactHtml}
+        <p>${contactInfoText}</p>
+        <p>Please consider using Uber and Lyft's two stop functionality when booking a ride, which may save you some walking.</p>
+        <br>
+        <p>Best regards,</p>
+        <p>Peer-ride support team</p>
+      `,
+    },
+  });
+};
+
 export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}", async (event) => {
   const beforeStatus = event.data?.before.data()?.status as string | undefined;
   const afterData = event.data?.after.data() as Record<string, unknown> | undefined;
@@ -409,66 +514,76 @@ export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}"
   }
 
   const requesterId = afterData.requesterId as string | undefined;
-  const hostNickname = (afterData.hostNickname as string | undefined) ?? "Host";
   const tripId = afterData.tripId as string | undefined;
+  const guestNickname = (afterData.requesterName as string | undefined) ?? "Guest";
+  const hostNickname = (afterData.hostNickname as string | undefined) ?? "Host";
 
   if (!requesterId || !tripId) return;
 
-  let requesterEmail: string | undefined;
-  try {
-    const user = await admin.auth().getUser(requesterId);
-    requesterEmail = user.email ?? undefined;
-  } catch (err) {
-    console.warn("Could not load requester user for email", err);
-  }
-
-  if (!requesterEmail) return;
-
   const tripSnapshot = await admin.firestore().doc(`trips/${tripId}`).get();
-  const tripData = tripSnapshot.data() as {
-    originId?: string;
-    destinationId?: string;
-    departureStart?: admin.firestore.Timestamp;
-    departureEnd?: admin.firestore.Timestamp;
-    hostNickname?: string;
-  } | undefined;
+  const tripData = tripSnapshot.data();
 
-  const origin = tripData?.originId ?? "Origin";
-  const destination = tripData?.destinationId ?? "Destination";
-  const start = tripData?.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
-  const end = tripData?.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
-  const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
+  if (!tripData) return;
+
+  const commonData = getCommonEmailData(tripData, tripId);
 
   if (afterStatus === "accepted") {
-    await admin.firestore().collection("mail").add({
-      to: requesterEmail,
-      message: {
-        subject: `Your pairing request was accepted by ${tripData?.hostNickname ?? hostNickname}`,
-        html: `
-          <p>Great news!</p>
-          <p>Your pairing request for <strong>${origin} → ${destination}</strong> was accepted.</p>
-          <ul>
-            <li>Host: ${tripData?.hostNickname ?? hostNickname}</li>
-            <li>Window: ${start} – ${end}</li>
-          </ul>
-          <p><a href="${tripUrl}">Open trip details</a> to coordinate.</p>
-        `,
-      },
-    });
+    // Notify Guest
+    try {
+      const user = await admin.auth().getUser(requesterId);
+      if (user.email) {
+        // Guest receives Host's contact info
+        await sendGuestAcceptanceEmail(
+          user.email,
+          hostNickname,
+          commonData,
+          tripData.hostContactMethod,
+          tripData.hostContactValue
+        );
+      }
+    } catch (err) {
+      console.warn("Could not load requester user for email", err);
+    }
+
+    // Notify Host
+    try {
+      if (tripData.hostId) {
+        const hostUser = await admin.auth().getUser(tripData.hostId);
+        if (hostUser.email) {
+          // Host receives Guest's contact info
+          await sendHostAcceptanceEmail(
+            hostUser.email,
+            guestNickname,
+            commonData,
+            afterData.requesterContactMethod,
+            afterData.requesterContactValue
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("Could not load host user for email", err);
+    }
   }
 
   if (afterStatus === "declined") {
-    await admin.firestore().collection("mail").add({
-      to: requesterEmail,
-      message: {
-        subject: `Your pairing request was declined by ${tripData?.hostNickname ?? hostNickname}`,
-        html: `
-          <p>Your request for <strong>${origin} → ${destination}</strong> was declined.</p>
-          <p>You can browse more trips and send another request.</p>
-          <p><a href="${frontendBaseUrl}">Open Peer Ride</a></p>
-        `,
-      },
-    });
+    try {
+      const user = await admin.auth().getUser(requesterId);
+      if (user.email) {
+        await admin.firestore().collection("mail").add({
+          to: user.email,
+          message: {
+            subject: `Your pairing request was declined by ${tripData.hostNickname ?? hostNickname}`,
+            html: `
+              <p>Your request for <strong>${commonData.origin} → ${commonData.destination}</strong> was declined.</p>
+              <p>You can browse more trips and send another request.</p>
+              <p><a href="${frontendBaseUrl}">Open Peer Ride</a></p>
+            `,
+          },
+        });
+      }
+    } catch (err) {
+      console.warn("Could not notify guest of decline", err);
+    }
   }
 });
 
