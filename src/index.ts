@@ -140,6 +140,7 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     destination: {
       name: string;
     }
+    timezone?: string;
   };
 
   if (!tripData.hostId) {
@@ -202,8 +203,19 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     if (hostEmail) {
       const origin = tripData.origin.name;
       const destination = tripData.destination.name;
-      const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
-      const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+      const tripTimezone = tripData.timezone || TIMEZONE;
+      const dateOptions: Intl.DateTimeFormatOptions = {
+        timeZone: tripTimezone,
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "shortOffset",
+      };
+
+      const start = tripData.departureStart?.toDate().toLocaleString("en-US", dateOptions) ?? "";
+      const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { ...dateOptions, timeZoneName: undefined }) ?? "";
 
       await admin.firestore().collection("mail").add({
         to: hostEmail,
@@ -415,8 +427,23 @@ const getCommonEmailData = (
 ) => {
   const origin = tripData.origin.name;
   const destination = tripData.destination.name;
-  const start = tripData.departureStart?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
-  const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { timeZone: TIMEZONE }) ?? "";
+  const tripTimezone = tripData.timezone || TIMEZONE;
+  const dateOptions: Intl.DateTimeFormatOptions = {
+    timeZone: tripTimezone,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "shortOffset",
+  };
+
+  const start = tripData.departureStart?.toDate().toLocaleString("en-US", dateOptions) ?? "";
+  const end = tripData.departureEnd?.toDate().toLocaleString("en-US", { ...dateOptions, timeZoneName: undefined }) ?? ""; // Concise end time? Or full? User asked "always clearly... display timezone".
+  // Maybe just start time has timezone, end time implicitly same.
+  // Or show both? "Jan 1, 10:00 AM GMT-5 – 11:00 AM"
+  // Let's stick to simple toLocaleString which includes date.
+
   const tripUrl = `${frontendBaseUrl}/trips/${tripId}`;
 
   const departureDate = tripData.departureStart?.toDate();
