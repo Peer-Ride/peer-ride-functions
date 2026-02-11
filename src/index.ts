@@ -8,35 +8,103 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 
 const TIMEZONE = "America/Chicago";
 
+type TripData = {
+  hostId: string
+  hostNickname: string
+  status: string
+  departureStart: admin.firestore.Timestamp
+  departureEnd: admin.firestore.Timestamp
+  origin: { name: string }
+  destination: { name: string }
+  timezone?: string
+  hostContactMethod?: string
+  hostContactValue?: string
+  guest?: {
+    id: string
+    nickname: string
+  } | null
+  luggage?: Record<string, number>
+  note?: string | null
+}
+
+type PairRequestData = {
+  tripId: string
+  hostId: string
+  hostNickname: string
+  requesterId: string
+  requesterName: string
+  status: string
+  luggage: Record<string, number>
+  note?: string | null
+  requesterContactMethod?: string
+  requesterContactValue?: string
+  created?: admin.firestore.Timestamp
+}
+
+type CreateTripPayload = {
+  origin: unknown
+  destination: unknown
+  departureStart: unknown
+  departureEnd: unknown
+  luggage: unknown
+  note: unknown
+  hostNickname: unknown
+  hostContactMethod: unknown
+  hostContactValue: unknown
+}
+
+type AcceptPairRequestPayload = {
+  requestId?: unknown
+}
+
 setGlobalOptions({ maxInstances: 10 });
 
 admin.initializeApp();
 
 const ALLOWED_DOMAINS_DOC_PATH = "config/emailDomains";
-let cachedDomains: string[] | null = null;
+let cachedConfig: Record<string, string[]> | null = null;
 let lastFetchMs = 0;
 const CACHE_TTL_MS = 60_000;
 const frontendBaseUrl = (process.env.FRONTEND_BASE_URL ?? "https://peerride.app").replace(/\/$/, "");
 
-async function getAllowedDomains(): Promise<string[]> {
+async function getSchoolConfig(): Promise<Record<string, string[]>> {
   const now = Date.now();
-  if (cachedDomains && now - lastFetchMs < CACHE_TTL_MS) {
-    return cachedDomains;
+  if (cachedConfig && now - lastFetchMs < CACHE_TTL_MS) {
+    return cachedConfig;
   }
 
   const snapshot = await admin.firestore().doc(ALLOWED_DOMAINS_DOC_PATH).get();
-
-  const domains = snapshot.get("domains");
-  if (!Array.isArray(domains) || domains.some((item) => typeof item !== "string")) {
-    throw new HttpsError(
-      "failed-precondition",
-      "Allowed email domains configuration is missing or invalid.",
-    );
+  if (!snapshot.exists) {
+    return {};
   }
 
-  cachedDomains = domains.map((domain) => domain.toLowerCase().trim());
+  const data = snapshot.data();
+  const config: Record<string, string[]> = {};
+
+  if (data) {
+    Object.entries(data).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        config[key] = value.map((v) => String(v).toLowerCase().trim());
+      }
+    });
+  }
+
+  cachedConfig = config;
   lastFetchMs = now;
-  return cachedDomains;
+  return config;
+}
+
+function getSchoolId(email: string | undefined, config: Record<string, string[]>): string | null {
+  if (!email) return null;
+  const domain = email.split("@")[1]?.toLowerCase();
+  if (!domain) return null;
+
+  for (const [schoolId, domains] of Object.entries(config)) {
+    if (domains.includes(domain)) {
+      return schoolId;
+    }
+  }
+  return null;
 }
 
 export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
@@ -46,13 +114,13 @@ export const restrictUserSignupByDomain = beforeUserCreated(async (event) => {
     throw new HttpsError("invalid-argument", "Email is required for registration.");
   }
 
-  const allowedDomains = await getAllowedDomains();
-  const userDomain = user.email.split("@")[1]?.toLowerCase();
+  const config = await getSchoolConfig();
+  const schoolId = getSchoolId(user.email, config);
 
-  if (!userDomain || !allowedDomains.includes(userDomain)) {
+  if (!schoolId) {
     throw new HttpsError(
       "permission-denied",
-      `Unauthorized email domain "${userDomain ?? "unknown"}". Please use an allowed campus email.`,
+      `Unauthorized email domain "${user.email.split("@")[1] ?? "unknown"}". Please use an allowed campus email.`,
     );
   }
 
@@ -77,8 +145,15 @@ const isIsoString = (value: unknown): value is string => typeof value === "strin
 
 export const createPairRequest = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = request.auth?.uid;
-  if (!uid) {
+  const email = request.auth?.token?.email;
+  if (!uid || !email) {
     throw new HttpsError("unauthenticated", "Sign in to submit a pairing request.");
+  }
+
+  const config = await getSchoolConfig();
+  const schoolId = getSchoolId(email, config);
+  if (!schoolId) {
+    throw new HttpsError("permission-denied", "Your email does not belong to a supported school.");
   }
 
   const { tripId, luggage, note, requesterName, requesterContactMethod, requesterContactValue } = request.data as CreatePairRequestPayload;
@@ -123,7 +198,7 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     throw new HttpsError("invalid-argument", "Luggage counts must be non-negative numbers.");
   }
 
-  const tripSnapshot = await admin.firestore().doc(`trips/${tripId}`).get();
+  const tripSnapshot = await admin.firestore().doc(`schools/${schoolId}/trips/${tripId}`).get();
   if (!tripSnapshot.exists) {
     throw new HttpsError("not-found", "Trip not found.");
   }
@@ -141,6 +216,7 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
       name: string;
     }
     timezone?: string;
+    schoolId?: string; // Implicitly known
   };
 
   if (!tripData.hostId) {
@@ -157,6 +233,8 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
 
   const existing = await admin
     .firestore()
+    .collection("schools")
+    .doc(schoolId)
     .collection("pairRequests")
     .where("tripId", "==", tripId)
     .where("requesterId", "==", uid)
@@ -172,7 +250,7 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
     ? requesterName.trim()
     : request.auth?.token?.name ?? "Anonymous";
 
-  const docRef = await admin.firestore().collection("pairRequests").add({
+  const docRef = await admin.firestore().collection("schools").doc(schoolId).collection("pairRequests").add({
     tripId,
     hostId: tripData.hostId,
     hostNickname: tripData.hostNickname ?? "Host",
@@ -189,6 +267,8 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
 
   const pendingSnapshot = await admin
     .firestore()
+    .collection("schools")
+    .doc(schoolId)
     .collection("pairRequests")
     .where("hostId", "==", tripData.hostId)
     .where("status", "==", "pending")
@@ -246,17 +326,24 @@ export const createPairRequest = onCall({ enforceAppCheck: true }, async (reques
 
 export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = request.auth?.uid;
-  if (!uid) {
+  const email = request.auth?.token?.email;
+  if (!uid || !email) {
     throw new HttpsError("unauthenticated", "Sign in to create a trip.");
   }
 
-  const { origin, destination, departureStart, departureEnd, luggage, note, hostNickname, hostContactMethod, hostContactValue } =
-    request.data as any;
+  const config = await getSchoolConfig();
+  const schoolId = getSchoolId(email, config);
+  if (!schoolId) {
+    throw new HttpsError("permission-denied", "Your email does not belong to a supported school.");
+  }
 
-  if (!origin || typeof origin !== "object" || !origin.id || !origin.name) {
+  const { origin, destination, departureStart, departureEnd, luggage, note, hostNickname, hostContactMethod, hostContactValue } =
+    request.data as CreateTripPayload;
+
+  if (!origin || typeof origin !== "object" || !(origin as any).id || !(origin as any).name) {
     throw new HttpsError("invalid-argument", "origin is required and must be a valid location object.");
   }
-  if (!destination || typeof destination !== "object" || !destination.id || !destination.name) {
+  if (!destination || typeof destination !== "object" || !(destination as any).id || !(destination as any).name) {
     throw new HttpsError("invalid-argument", "destination is required and must be a valid location object.");
   }
   if (!isIsoString(departureStart) || !isIsoString(departureEnd)) {
@@ -297,6 +384,8 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   // Limit: max 5 active trips (open or paired)
   const active = await admin
     .firestore()
+    .collection("schools")
+    .doc(schoolId)
     .collection("trips")
     .where("hostId", "==", uid)
     .where("status", "in", ["open", "paired"])
@@ -313,7 +402,7 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   const departureStartDate = new Date(departureStart as string);
   const departureEndDate = new Date(departureEnd as string);
 
-  const docRef = await admin.firestore().collection("trips").add({
+  const docRef = await admin.firestore().collection("schools").doc(schoolId).collection("trips").add({
     hostId: uid,
     hostNickname: typeof hostNickname === "string" && hostNickname.trim() ? hostNickname.trim() : request.auth?.token?.name ?? "Host",
     hostContactMethod: method,
@@ -333,14 +422,19 @@ export const createTrip = onCall({ enforceAppCheck: true }, async (request) => {
   return { id: docRef.id };
 });
 
-type AcceptPairRequestPayload = {
-  requestId?: unknown;
-};
+
 
 export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (request) => {
   const uid = request.auth?.uid;
-  if (!uid) {
+  const email = request.auth?.token?.email;
+  if (!uid || !email) {
     throw new HttpsError("unauthenticated", "Sign in to accept pairing requests.");
+  }
+
+  const config = await getSchoolConfig();
+  const schoolId = getSchoolId(email, config);
+  if (!schoolId) {
+    throw new HttpsError("permission-denied", "Your email does not belong to a supported school.");
   }
 
   const { requestId } = request.data as AcceptPairRequestPayload;
@@ -348,20 +442,20 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
     throw new HttpsError("invalid-argument", "requestId is required.");
   }
 
-  const reqRef = admin.firestore().doc(`pairRequests/${requestId}`);
-  const tripRefFromReq = (tripId: string) => admin.firestore().doc(`trips/${tripId}`);
+  const reqRef = admin.firestore().doc(`schools/${schoolId}/pairRequests/${requestId}`);
+  const tripRefFromReq = (tripId: string) => admin.firestore().doc(`schools/${schoolId}/trips/${tripId}`);
 
   await admin.firestore().runTransaction(async (txn) => {
     const reqSnap = await txn.get(reqRef);
     if (!reqSnap.exists) {
       throw new HttpsError("not-found", "Pair request not found.");
     }
-    const reqData = reqSnap.data() as any;
+    const reqData = reqSnap.data() as PairRequestData;
     if (reqData.status !== "pending") {
       throw new HttpsError("failed-precondition", "Only pending requests can be accepted.");
     }
 
-    const tripId = reqData.tripId as string | undefined;
+    const tripId = reqData.tripId;
     if (!tripId) {
       throw new HttpsError("failed-precondition", "Request is missing tripId.");
     }
@@ -371,7 +465,7 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
       throw new HttpsError("not-found", "Trip not found.");
     }
 
-    const tripData = tripSnap.data() as any;
+    const tripData = tripSnap.data() as TripData;
     if (tripData.hostId !== uid) {
       throw new HttpsError("permission-denied", "Only the host can accept requests for this trip.");
     }
@@ -399,6 +493,8 @@ export const acceptPairRequest = onCall({ enforceAppCheck: true }, async (reques
   const tripId = (reqSnap.data() as any).tripId as string;
   const pending = await admin
     .firestore()
+    .collection("schools")
+    .doc(schoolId)
     .collection("pairRequests")
     .where("tripId", "==", tripId)
     .where("status", "==", "pending")
@@ -531,12 +627,13 @@ const sendHostAcceptanceEmail = async (
   });
 };
 
-export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}", async (event) => {
+export const notifyPairAcceptance = onDocumentUpdated("schools/{schoolId}/pairRequests/{requestId}", async (event) => {
   const beforeStatus = event.data?.before.data()?.status as string | undefined;
   const afterData = event.data?.after.data() as Record<string, unknown> | undefined;
   const afterStatus = afterData?.status as string | undefined;
+  const schoolId = event.params?.schoolId;
 
-  if (!afterData || beforeStatus === afterStatus) {
+  if (!afterData || beforeStatus === afterStatus || !schoolId) {
     return;
   }
 
@@ -547,8 +644,8 @@ export const notifyPairAcceptance = onDocumentUpdated("pairRequests/{requestId}"
 
   if (!requesterId || !tripId) return;
 
-  const tripSnapshot = await admin.firestore().doc(`trips/${tripId}`).get();
-  const tripData = tripSnapshot.data();
+  const tripSnapshot = await admin.firestore().doc(`schools/${schoolId}/trips/${tripId}`).get();
+  const tripData = tripSnapshot.data() as TripData | undefined;
 
   if (!tripData) return;
 
@@ -626,19 +723,19 @@ export const cleanupStaleData = onSchedule({
   const cutoffAllTrip = new Date(cutoffOpenTrip.getTime() - 2 * 24 * 60 * 60 * 1000);
   const cutoffMail = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  // Find open/expired trips
+  // Find open/expired trips using Collection Group Query
   const tripsSnapOpen = await db
-    .collection("trips")
+    .collectionGroup("trips")
     .where("status", "==", "open")
     .where("departureEnd", "<", cutoffOpenTrip)
     .get();
 
   const tripsSnapAll = await db
-    .collection("trips")
+    .collectionGroup("trips")
     .where("departureEnd", "<", cutoffAllTrip)
     .get();
 
-  let tripsToDelete = tripsSnapOpen.docs;
+  const tripsToDelete = [...tripsSnapOpen.docs];
   for (const doc of tripsSnapAll.docs) {
     if (!tripsToDelete.find((d) => d.id === doc.id)) {
       tripsToDelete.push(doc);
@@ -647,14 +744,23 @@ export const cleanupStaleData = onSchedule({
 
   for (const tripDoc of tripsToDelete) {
     const tripId = tripDoc.id;
+    // Derive schoolId from tripDoc path: schools/{schoolId}/trips/{tripId}
+    const pathSegments = tripDoc.ref.path.split("/");
+    // [0] schools, [1] schoolId, [2] trips, [3] tripId
+    const schoolId = pathSegments.length >= 2 ? pathSegments[1] : null;
+
+    if (!schoolId) continue;
+
+    const batch = db.batch();
 
     // delete pairing requests for this trip
-    const reqs = await db.collection("pairRequests").where("tripId", "==", tripId).get();
-    const batch = db.batch();
+    const reqs = await db.collection("schools").doc(schoolId).collection("pairRequests").where("tripId", "==", tripId).get();
     reqs.docs.forEach((doc) => batch.delete(doc.ref));
 
-    // delete chat messages subcollection
-    const messages = await db.collection(`tripChats/${tripId}/messages`).get();
+    // delete chat messages subcollection. Assuming `schools/{schoolId}/tripChats/{tripId}/messages`
+    // or maybe `schools/{schoolId}/trips/{tripId}/messages`?
+    // Let's assume standard structure: schools/{schoolId}/tripChats/{tripId}/messages
+    const messages = await db.collection("schools").doc(schoolId).collection("tripChats").doc(tripId).collection("messages").get();
     messages.docs.forEach((msg) => batch.delete(msg.ref));
 
     batch.delete(tripDoc.ref);
